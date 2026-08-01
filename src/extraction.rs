@@ -82,6 +82,17 @@ pub struct ExtractionSummary {
     pub failures: Vec<ExtractionFailure>,
 }
 
+fn package_appid(package: &Path) -> Option<String> {
+    package
+        .ancestors()
+        .skip(1)
+        .take(5)
+        .filter_map(Path::file_name)
+        .filter_map(|name| name.to_str())
+        .find(|value| is_appid(value))
+        .map(str::to_owned)
+}
+
 pub fn extract_many_with_progress(
     packages: &[PathBuf],
     output: &Path,
@@ -95,13 +106,7 @@ pub fn extract_many_with_progress(
     let mut failures = Vec::new();
     progress(0, total, 0)?;
     for (index, package) in packages.iter().enumerate() {
-        let appid = package
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            .filter(|value| is_appid(value))
-            .map(str::to_owned);
+        let appid = package_appid(package);
         let Some(appid) = appid else {
             failures.push(ExtractionFailure {
                 appid: package.to_string_lossy().into_owned(),
@@ -142,6 +147,20 @@ mod tests {
     #[test]
     fn accepts_normal_paths() {
         assert_eq!(safe_components("pages/home.js").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn finds_appid_in_modern_and_legacy_package_paths() {
+        assert_eq!(
+            package_appid(Path::new(
+                "/cache/packages/wx0123456789abcdef/42/__APP__.wxapkg"
+            )),
+            Some("wx0123456789abcdef".into())
+        );
+        assert_eq!(
+            package_appid(Path::new("/cache/Applet/wx0123456789abcdef/__APP__.wxapkg")),
+            Some("wx0123456789abcdef".into())
+        );
     }
     #[test]
     fn fixture_is_extractable() {

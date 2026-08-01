@@ -3,6 +3,7 @@ pub mod extraction;
 pub mod gui;
 #[cfg(test)]
 mod known_samples;
+pub mod locator;
 pub mod platform;
 mod recognition;
 mod wxapkg;

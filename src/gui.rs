@@ -1,7 +1,7 @@
 use crate::{
     cache::{self, Applet},
     extraction::{self, ExtractionSummary},
-    platform,
+    locator, platform,
 };
 use chrono::{Local, TimeZone};
 use eframe::egui::{self, Align, Align2, Color32, FontFamily, Id, Layout, RichText, Sense, Vec2};
@@ -52,6 +52,7 @@ impl UiMetrics {
     const PAGE_PADDING: i8 = 16;
     const TOOLBAR_PADDING_X: i8 = 16;
     const TOOLBAR_PADDING_Y: i8 = 12;
+    const FLOATING_ACTION_RIGHT_INSET: f32 = 44.0;
     // The table is inset by 32 px, so this corresponds to a 1160 px window.
     const COLUMN_BREAKPOINT: f32 = 1128.0;
 }
@@ -70,6 +71,7 @@ enum SortColumn {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperationKind {
+    Locate,
     Scan,
     Extract,
 }
@@ -85,6 +87,10 @@ struct Operation {
 }
 
 enum AppEvent {
+    LocateFinished {
+        id: u64,
+        result: Vec<locator::CacheCandidate>,
+    },
     ScanProgress {
         id: u64,
         completed: usize,
@@ -176,6 +182,7 @@ pub struct InspectorApp {
     operation: Option<Operation>,
     next_operation: u64,
     notice: Option<Notice>,
+    auto_located_candidates: Option<usize>,
     textures: HashMap<String, egui::TextureHandle>,
     tx: Sender<AppEvent>,
     rx: Receiver<AppEvent>,
@@ -195,7 +202,7 @@ impl InspectorApp {
                 .unwrap_or_default()
         });
         let (tx, rx) = mpsc::channel();
-        let mut app = Self {
+        let app = Self {
             root,
             scanned: false,
             rows: Vec::new(),
@@ -207,14 +214,29 @@ impl InspectorApp {
             operation: None,
             next_operation: 0,
             notice: None,
+            auto_located_candidates: None,
             textures: HashMap::new(),
             tx,
             rx,
         };
-        if test_root.is_some() {
-            app.start_scan();
+        #[cfg(not(test))]
+        {
+            let mut app = app;
+            let saved_root_is_valid = !app.root.trim().is_empty()
+                && cache::inspect_cache_root(Path::new(app.root.trim())).is_some();
+            if test_root.is_some() || saved_root_is_valid {
+                app.start_scan();
+            } else {
+                app.root.clear();
+                app.start_locate();
+            }
+            app
         }
-        app
+        #[cfg(test)]
+        {
+            let _ = test_root;
+            app
+        }
     }
 
     fn notify(&mut self, message: impl Into<String>, error: bool, persistent: bool) {
@@ -231,6 +253,27 @@ impl InspectorApp {
     fn next_id(&mut self) -> u64 {
         self.next_operation += 1;
         self.next_operation
+    }
+
+    fn start_locate(&mut self) {
+        if self.operation.is_some() {
+            return;
+        }
+        let id = self.next_id();
+        self.operation = Some(Operation {
+            id,
+            kind: OperationKind::Locate,
+            completed: 0,
+            total: 0,
+            files: 0,
+            cancelling: false,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = locator::discover_cache_roots();
+            let _ = tx.send(AppEvent::LocateFinished { id, result });
+        });
     }
 
     fn start_scan(&mut self) {
@@ -350,6 +393,23 @@ impl InspectorApp {
     fn poll_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
+                AppEvent::LocateFinished { id, result } => {
+                    if self.operation.as_ref().is_none_or(|value| value.id != id) {
+                        continue;
+                    }
+                    self.operation = None;
+                    if let Some(candidate) = result.first() {
+                        self.root = candidate.path.to_string_lossy().into_owned();
+                        self.auto_located_candidates = Some(result.len());
+                        self.start_scan();
+                    } else {
+                        self.notify(
+                            "未自动找到缓存目录，请先在微信中打开一个小程序或手动选择目录",
+                            true,
+                            false,
+                        );
+                    }
+                }
                 AppEvent::ScanProgress {
                     id,
                     completed,
@@ -372,11 +432,15 @@ impl InspectorApp {
                             self.scanned = true;
                             self.selected.clear();
                             self.textures.clear();
-                            self.notify(
-                                format!("已扫描 {} 个小程序", self.rows.len()),
-                                false,
-                                false,
-                            );
+                            let message = match self.auto_located_candidates.take() {
+                                Some(count) if count > 1 => format!(
+                                    "已从 {count} 个缓存目录中选择最近使用目录，扫描到 {} 个小程序",
+                                    self.rows.len()
+                                ),
+                                Some(_) => format!("已自动定位并扫描 {} 个小程序", self.rows.len()),
+                                None => format!("已扫描 {} 个小程序", self.rows.len()),
+                            };
+                            self.notify(message, false, false);
                         }
                         Err(error) if error.contains("操作已取消") => {
                             self.notify("已取消扫描", false, false);
@@ -470,7 +534,15 @@ impl InspectorApp {
             self.notify("无效 AppID", true, true);
             return;
         }
-        let path = Path::new(self.root.trim()).join("packages").join(appid);
+        let path = self
+            .rows
+            .iter()
+            .find(|row| row.appid == appid)
+            .map(|row| PathBuf::from(&row.package_dir));
+        let Some(path) = path else {
+            self.notify("未找到该小程序的缓存目录", true, true);
+            return;
+        };
         if let Err(error) = platform::open_path(&path) {
             self.notify(error, true, true);
         }
@@ -520,12 +592,19 @@ impl InspectorApp {
                         operation_info
                     {
                         let progress_width = (available * 0.3).clamp(260.0, 420.0);
+                        let cancel_width = if kind == OperationKind::Locate {
+                            0.0
+                        } else {
+                            36.0
+                        };
                         let path_width =
-                            (available - 108.0 - progress_width - spacing * 4.0).max(320.0);
+                            (available - 72.0 - cancel_width - progress_width - spacing * 4.0)
+                                .max(320.0);
                         self.path_controls_with_width(ui, path_width);
                         let total = operation_total.max(1);
                         let progress = completed as f32 / total as f32;
                         let label = match kind {
+                            OperationKind::Locate => "正在定位微信缓存".to_owned(),
                             OperationKind::Scan => format!(
                                 "正在扫描 {}/{}",
                                 completed,
@@ -544,20 +623,22 @@ impl InspectorApp {
                             egui::ProgressBar::new(progress)
                                 .text(RichText::new(label).color(TEXT_PRIMARY))
                                 .fill(PROGRESS_FILL)
+                                .animate(kind == OperationKind::Locate)
                                 .desired_height(UiMetrics::CONTROL_HEIGHT)
                                 .desired_width(progress_width),
                         );
-                        if ui
-                            .add_enabled(!cancelling, standard_icon_button(Icon::CircleX))
-                            .on_hover_text("取消")
-                            .clicked()
+                        if kind != OperationKind::Locate
+                            && ui
+                                .add_enabled(!cancelling, standard_icon_button(Icon::CircleX))
+                                .on_hover_text("取消")
+                                .clicked()
                         {
                             self.cancel_operation();
                         }
                     } else {
                         let filter_width = if available < 1100.0 { 240.0 } else { 270.0 };
                         let path_width =
-                            (available - 72.0 - filter_width - spacing * 3.0).max(320.0);
+                            (available - 108.0 - filter_width - spacing * 4.0).max(320.0);
                         self.path_controls_with_width(ui, path_width);
                         self.filter_controls(ui, filter_width);
                     }
@@ -567,8 +648,11 @@ impl InspectorApp {
 
     fn path_controls_with_width(&mut self, ui: &mut egui::Ui, path_width: f32) {
         let idle = self.operation.is_none();
-        let path_response =
-            single_line_input(ui, &mut self.root, path_width, "微信 Applet 缓存目录");
+        let path_response = ui
+            .add_enabled_ui(idle, |ui| {
+                single_line_input(ui, &mut self.root, path_width, "微信 Applet 缓存目录")
+            })
+            .inner;
         let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
         if enter_pressed && (path_response.has_focus() || path_response.lost_focus()) {
             self.start_scan();
@@ -579,6 +663,13 @@ impl InspectorApp {
             .clicked()
         {
             self.choose_and_scan();
+        }
+        if ui
+            .add_enabled(idle, standard_icon_button(Icon::LocateFixed))
+            .on_hover_text("自动定位")
+            .clicked()
+        {
+            self.start_locate();
         }
         if ui
             .add_enabled(
@@ -614,7 +705,13 @@ impl InspectorApp {
     fn empty_state(&mut self, ui: &mut egui::Ui) {
         ui.with_layout(Layout::top_down(Align::Center), |ui| {
             ui.add_space(110.0);
-            let message = if !self.scanned {
+            let locating = self
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.kind == OperationKind::Locate);
+            let message = if locating {
+                "正在定位微信缓存"
+            } else if !self.scanned {
                 "尚未扫描缓存目录"
             } else if self.rows.is_empty() {
                 "该目录中没有可识别的小程序"
@@ -627,14 +724,23 @@ impl InspectorApp {
                     .color(Color32::from_gray(100)),
             );
             ui.add_space(10.0);
-            if !self.scanned {
-                if ui
-                    .add(standard_icon_button(Icon::FolderOpen))
-                    .on_hover_text("选择目录")
-                    .clicked()
-                {
-                    self.choose_and_scan();
-                }
+            if !self.scanned && self.operation.is_none() {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(standard_icon_button(Icon::LocateFixed))
+                        .on_hover_text("自动定位")
+                        .clicked()
+                    {
+                        self.start_locate();
+                    }
+                    if ui
+                        .add(standard_icon_button(Icon::FolderOpen))
+                        .on_hover_text("选择目录")
+                        .clicked()
+                    {
+                        self.choose_and_scan();
+                    }
+                });
             } else if !self.query.is_empty()
                 && !self.rows.is_empty()
                 && ui
@@ -921,7 +1027,10 @@ impl InspectorApp {
     fn floating_controls(&mut self, ctx: &egui::Context) {
         if !self.selected.is_empty() {
             egui::Area::new(Id::new("bulk-actions"))
-                .anchor(Align2::RIGHT_BOTTOM, Vec2::new(-20.0, -20.0))
+                .anchor(
+                    Align2::RIGHT_BOTTOM,
+                    Vec2::new(-UiMetrics::FLOATING_ACTION_RIGHT_INSET, -20.0),
+                )
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
                     egui::Frame::popup(ui.style())
@@ -1676,6 +1785,8 @@ mod tests {
         harness.get_by_label("尚未扫描缓存目录");
         let folder_icon = char::from(Icon::FolderOpen).to_string();
         assert_eq!(harness.get_all_by_label(&folder_icon).count(), 2);
+        let locate_icon = char::from(Icon::LocateFixed).to_string();
+        assert_eq!(harness.get_all_by_label(&locate_icon).count(), 2);
         for button in harness.get_all_by_label(&folder_icon) {
             assert!((button.rect().height() - UiMetrics::CONTROL_HEIGHT).abs() <= 1.0);
         }
@@ -1730,6 +1841,34 @@ mod tests {
         let cancel_center = harness.get_by_label(&cancel_icon).rect().center().y;
         assert!((path_center - progress_center).abs() <= 1.0);
         assert!((path_center - cancel_center).abs() <= 1.0);
+    }
+
+    #[test]
+    fn locating_state_is_clear_and_hides_duplicate_empty_actions() {
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(UiMetrics::MIN_WINDOW_WIDTH, 560.0))
+            .build_eframe(|cc| InspectorApp::new(cc));
+        harness.state_mut().operation = Some(Operation {
+            id: 1,
+            kind: OperationKind::Locate,
+            completed: 0,
+            total: 0,
+            files: 0,
+            cancelling: false,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        harness.step();
+
+        assert_eq!(
+            harness
+                .get_all_by_label_contains("正在定位微信缓存")
+                .count(),
+            2
+        );
+        let locate_icon = char::from(Icon::LocateFixed).to_string();
+        assert_eq!(harness.get_all_by_label(&locate_icon).count(), 1);
+        let cancel_icon = char::from(Icon::CircleX).to_string();
+        assert!(harness.query_by_label(&cancel_icon).is_none());
     }
 
     #[test]

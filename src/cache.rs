@@ -11,6 +11,22 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheLayout {
+    Radium,
+    Legacy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CacheRootInfo {
+    pub root: PathBuf,
+    pub packages_root: PathBuf,
+    pub icon_root: PathBuf,
+    pub layout: CacheLayout,
+    pub app_count: usize,
+    pub modified_at: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Applet {
     pub appid: String,
@@ -55,6 +71,69 @@ fn seconds(time: Option<SystemTime>) -> u64 {
     time.and_then(|value| value.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn directory_activity(path: &Path, depth: usize) -> u64 {
+    let mut latest = fs::metadata(path)
+        .ok()
+        .map(|metadata| seconds(metadata.modified().ok()))
+        .unwrap_or(0);
+    if depth == 0 {
+        return latest;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return latest;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let child = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&child) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        latest = latest.max(seconds(metadata.modified().ok()));
+        if metadata.is_dir() {
+            latest = latest.max(directory_activity(&child, depth - 1));
+        }
+    }
+    latest
+}
+
+pub fn inspect_cache_root(root: &Path) -> Option<CacheRootInfo> {
+    let root = root.canonicalize().ok()?;
+    let modern_packages = root.join("packages");
+    let (layout, packages_root) = if modern_packages.is_dir() {
+        (CacheLayout::Radium, modern_packages)
+    } else {
+        let has_app_directories = fs::read_dir(&root)
+            .ok()?
+            .filter_map(Result::ok)
+            .any(|entry| entry.path().is_dir() && entry.file_name().to_str().is_some_and(is_appid));
+        if !has_app_directories {
+            return None;
+        }
+        (CacheLayout::Legacy, root.clone())
+    };
+    let app_directories = fs::read_dir(&packages_root)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir() && entry.file_name().to_str().is_some_and(is_appid))
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    let modified_at = app_directories
+        .iter()
+        .map(|path| directory_activity(path, 3))
+        .max()
+        .unwrap_or_else(|| directory_activity(&packages_root, 1));
+    Some(CacheRootInfo {
+        icon_root: root.join("icon"),
+        root,
+        packages_root,
+        layout,
+        app_count: app_directories.len(),
+        modified_at,
+    })
 }
 
 fn collect_packages(directory: &Path, packages: &mut Vec<PathBuf>) {
@@ -156,11 +235,10 @@ pub fn scan_with_progress(
     root: &Path,
     mut progress: impl FnMut(usize, usize) -> Result<(), String>,
 ) -> Result<Vec<Applet>, String> {
-    let packages_root = root.join("packages");
-    if !packages_root.is_dir() {
-        return Err(format!("未找到 packages 目录：{}", packages_root.display()));
-    }
-    let icons = icon_paths(root);
+    let info = inspect_cache_root(root)
+        .ok_or_else(|| format!("不是有效的微信小程序缓存目录：{}", root.display()))?;
+    let packages_root = info.packages_root;
+    let icons = icon_paths(&info.root);
     let mut directories: Vec<_> = fs::read_dir(&packages_root)
         .map_err(|error| error.to_string())?
         .filter_map(Result::ok)
@@ -360,6 +438,33 @@ mod tests {
         assert!(is_appid("wx26a31270d9ab25e0"));
         assert!(!is_appid("wx26a31270d9ab25预"));
         assert!(!is_appid("wx26a31270d9ab25e"));
+    }
+
+    #[test]
+    fn detects_modern_and_legacy_cache_layouts() {
+        let base = std::env::temp_dir().join(format!(
+            "wxapplet-layout-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let modern = base.join("modern");
+        let legacy = base.join("legacy");
+        fs::create_dir_all(modern.join("packages/wx0123456789abcdef")).unwrap();
+        fs::create_dir_all(legacy.join("wxfedcba9876543210")).unwrap();
+
+        let modern_info = inspect_cache_root(&modern).unwrap();
+        assert_eq!(modern_info.layout, CacheLayout::Radium);
+        assert_eq!(modern_info.app_count, 1);
+        assert_eq!(
+            modern_info.packages_root,
+            modern.canonicalize().unwrap().join("packages")
+        );
+
+        let legacy_info = inspect_cache_root(&legacy).unwrap();
+        assert_eq!(legacy_info.layout, CacheLayout::Legacy);
+        assert_eq!(legacy_info.app_count, 1);
+        assert_eq!(legacy_info.packages_root, legacy.canonicalize().unwrap());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
