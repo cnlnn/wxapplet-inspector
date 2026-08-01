@@ -38,7 +38,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgl1-mesa-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxkbcommon-dev libxrandr-dev
-      - run: cargo test --all-targets
+      - run: cargo test --all-targets -- --test-threads=1
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --release
       - name: Package Linux
