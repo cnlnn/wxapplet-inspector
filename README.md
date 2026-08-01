@@ -48,7 +48,7 @@ cargo build --release
 
 Linux 同时支持 X11 和 Wayland。
 
-GitHub Actions 会在 Linux x86_64、Windows x86_64、macOS Intel 和 macOS Apple Silicon 上执行测试、Clippy 检查并生成安装包。推送 `v*` 标签时会自动创建 GitHub Release。
+GitHub Actions 会生成 Linux x86_64 AppImage、Windows x86_64 EXE，以及适用于 Intel 和 Apple Silicon 的 macOS DMG。推送 `v*` 标签时会自动创建 GitHub Release。
 
 ## 隐私
 

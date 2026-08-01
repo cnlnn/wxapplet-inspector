@@ -4,6 +4,12 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 name="微信小程序缓存识别器"
 app="$root/dist/$name.app"
+case "$(uname -m)" in
+  x86_64) arch="x86_64" ;;
+  arm64) arch="arm64" ;;
+  *) echo "unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+dmg="$root/dist/wxapplet-inspector-macos-$arch.dmg"
 
 find "$app" -depth -delete 2>/dev/null || true
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
@@ -24,5 +30,4 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-ditto -c -k --sequesterRsrc --keepParent "$app" \
-  "$root/dist/wxapplet-inspector-macos-$(uname -m).app.zip"
+hdiutil create -volname "$name" -srcfolder "$app" -ov -format UDZO "$dmg"
