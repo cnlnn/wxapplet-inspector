@@ -1,0 +1,67 @@
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "$0")")"
+
+# Wayland compositors identify an application's icon through its app_id and a
+# matching desktop file. Register the AppImage before the window is created so
+# KDE can resolve wxapplet-inspector to the bundled icon.
+register_desktop_icon() {
+  [ -n "${HOME:-}" ] || return 0
+
+  data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+  applications_dir="$data_home/applications"
+  desktop_target="$applications_dir/wxapplet-inspector.desktop"
+  changed=0
+
+  mkdir -p "$applications_dir" || return 0
+
+  desktop_tmp="$(mktemp "$applications_dir/.wxapplet-inspector.XXXXXX")" || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      Exec=*)
+        if [ -n "${APPIMAGE:-}" ]; then
+          # shellcheck disable=SC2016
+          escaped_exec="$(printf '%s' "$APPIMAGE" | sed 's/\\/\\\\/g; s/"/\\"/g; s/`/\\`/g; s/\$/\\$/g')"
+          printf 'Exec="%s"\n' "$escaped_exec"
+        else
+          printf '%s\n' "$line"
+        fi
+        ;;
+      Icon=*)
+        printf 'Icon=%s\n' "$data_home/icons/hicolor/512x512/apps/wxapplet-inspector.png"
+        ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done < "$HERE/usr/share/applications/wxapplet-inspector.desktop" > "$desktop_tmp"
+
+  # Install every commonly requested size before publishing the desktop file.
+  # KDE may cache a missing icon as soon as it notices a new desktop entry.
+  for size in 16 32 48 64 128 256 512; do
+    icon_dir="$data_home/icons/hicolor/${size}x${size}/apps"
+    icon_source="$HERE/usr/share/icons/hicolor/${size}x${size}/apps/wxapplet-inspector.png"
+    icon_target="$icon_dir/wxapplet-inspector.png"
+    mkdir -p "$icon_dir" || continue
+    if ! cmp -s "$icon_source" "$icon_target"; then
+      install -m 0644 "$icon_source" "$icon_target"
+      changed=1
+    fi
+  done
+
+  if ! cmp -s "$desktop_tmp" "$desktop_target"; then
+    chmod 0644 "$desktop_tmp"
+    mv -f "$desktop_tmp" "$desktop_target"
+    changed=1
+  else
+    rm -f "$desktop_tmp"
+  fi
+
+  if [ "$changed" -eq 1 ]; then
+    if command -v kbuildsycoca6 >/dev/null 2>&1; then
+      kbuildsycoca6 >/dev/null 2>&1 || true
+    elif command -v update-desktop-database >/dev/null 2>&1; then
+      update-desktop-database "$applications_dir" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
+register_desktop_icon
+exec "$HERE/usr/bin/wxapplet-inspector" "$@"

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=微信小程序缓存识别器
+Exec=wxapplet-inspector
+Icon=wxapplet-inspector
+Terminal=false
+Categories=Utility;
+StartupWMClass=wxapplet-inspector
+X-WXApplet-Integration-Version=3

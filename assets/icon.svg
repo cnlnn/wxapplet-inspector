@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">WeChat mini-program cache inspector</title>
+  <desc id="desc">A package archive under a magnifying glass</desc>
+  <rect x="48" y="48" width="928" height="928" rx="208" fill="#243137"/>
+  <path d="M512 195 774 342 512 489 250 342Z" fill="#23B08A"/>
+  <path d="M250 342 512 489v300L250 642Z" fill="#F5F8F7"/>
+  <path d="M774 342 512 489v300l262-147Z" fill="#DDE8E5"/>
+  <path d="M454 227 716 374l-80 45-262-147Z" fill="#F0B84B"/>
+  <path d="m374 420 80 45v134l-80-45Z" fill="#D69A2F"/>
+  <path d="M307 461v123l103 58" fill="none" stroke="#B6CAC5" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="676" cy="657" r="169" fill="#243137" stroke="#FFFFFF" stroke-width="52"/>
+  <circle cx="676" cy="657" r="108" fill="#37C6A2"/>
+  <path d="m793 779 111 111" fill="none" stroke="#F0B84B" stroke-width="78" stroke-linecap="round"/>
+  <path d="M620 625h112M620 673h82" fill="none" stroke="#FFFFFF" stroke-width="30" stroke-linecap="round"/>
+</svg>
