@@ -25,7 +25,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>local.wxapplet.inspector</string>
   <key>CFBundleName</key><string>微信小程序缓存识别器</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>0.1.1</string>
   <key>CFBundleIconFile</key><string>icon.icns</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

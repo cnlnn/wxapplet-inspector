@@ -3,7 +3,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 binary="$root/target/release/wxapplet-inspector"
-output="$root/dist/wxapplet-inspector_0.1.0_amd64.AppImage"
+output="$root/dist/wxapplet-inspector_0.1.1_amd64.AppImage"
 staged="$root/dist/.wxapplet-inspector.$$.AppImage"
 
 if [[ ! -x "$binary" ]]; then
