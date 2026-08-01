@@ -24,4 +24,5 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-ditto -c -k --sequesterRsrc --keepParent "$app" "$root/dist/$name-$(uname -m).app.zip"
+ditto -c -k --sequesterRsrc --keepParent "$app" \
+  "$root/dist/wxapplet-inspector-macos-$(uname -m).app.zip"
