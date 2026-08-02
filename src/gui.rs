@@ -1,6 +1,6 @@
 use crate::{
-    cache::{self, Applet},
-    extraction::{self, ExtractionSummary},
+    cache::{self, Applet, CachedPackage},
+    extraction::{self, ExtractionMode, ExtractionSummary, ExtractionTarget},
     locator, platform,
 };
 use chrono::{Local, TimeZone};
@@ -184,6 +184,7 @@ pub struct InspectorApp {
     notice: Option<Notice>,
     auto_located_candidates: Option<usize>,
     textures: HashMap<String, egui::TextureHandle>,
+    plugin_packages: HashMap<String, CachedPackage>,
     tx: Sender<AppEvent>,
     rx: Receiver<AppEvent>,
 }
@@ -216,6 +217,7 @@ impl InspectorApp {
             notice: None,
             auto_located_candidates: None,
             textures: HashMap::new(),
+            plugin_packages: HashMap::new(),
             tx,
             rx,
         };
@@ -329,33 +331,55 @@ impl InspectorApp {
         }
     }
 
-    fn start_extract(&mut self) {
+    fn start_extract(&mut self, mode: ExtractionMode) {
         if self.operation.is_some() {
             return;
         }
-        let packages = self
+        let targets = self
             .rows
             .iter()
-            .filter(|row| self.selected.contains(&row.appid) && !row.main_package.is_empty())
-            .map(|row| PathBuf::from(&row.main_package))
+            .filter(|row| self.selected.contains(&row.appid) && !row.active_packages.is_empty())
+            .map(ExtractionTarget::applet)
             .collect::<Vec<_>>();
-        if packages.is_empty() {
+        self.start_targets_extract(targets, mode, "选择解压输出目录");
+    }
+
+    fn start_plugin_extract(&mut self, appid: &str) {
+        let Some(package) = self.plugin_packages.get(appid).cloned() else {
+            self.notify("未找到该插件的缓存包", true, false);
+            return;
+        };
+        self.start_targets_extract(
+            vec![ExtractionTarget::plugin(appid.to_owned(), package)],
+            ExtractionMode::Complete,
+            "选择插件解压输出目录",
+        );
+    }
+
+    fn start_targets_extract(
+        &mut self,
+        targets: Vec<ExtractionTarget>,
+        mode: ExtractionMode,
+        dialog_title: &str,
+    ) {
+        if self.operation.is_some() || targets.is_empty() {
             return;
         }
-        let Some(output) = rfd::FileDialog::new()
-            .set_title("选择解压输出目录")
-            .pick_folder()
-        else {
+        let Some(output) = rfd::FileDialog::new().set_title(dialog_title).pick_folder() else {
             return;
         };
 
         let id = self.next_id();
         let cancel = Arc::new(AtomicBool::new(false));
+        let package_total = targets
+            .iter()
+            .map(|target| target.package_count(mode))
+            .sum();
         self.operation = Some(Operation {
             id,
             kind: OperationKind::Extract,
             completed: 0,
-            total: packages.len(),
+            total: package_total,
             files: 0,
             cancelling: false,
             cancel: cancel.clone(),
@@ -364,8 +388,9 @@ impl InspectorApp {
         thread::spawn(move || {
             let progress_tx = tx.clone();
             let result = extraction::extract_many_with_progress(
-                &packages,
+                &targets,
                 &output,
+                mode,
                 |completed, total, files| {
                     if cancel.load(AtomicOrdering::Relaxed) {
                         return Err("操作已取消".into());
@@ -432,6 +457,18 @@ impl InspectorApp {
                             self.scanned = true;
                             self.selected.clear();
                             self.textures.clear();
+                            self.plugin_packages.clear();
+                            let dependencies = self
+                                .rows
+                                .iter()
+                                .flat_map(dependency_ids)
+                                .collect::<HashSet<_>>();
+                            let root = Path::new(self.root.trim());
+                            for appid in dependencies {
+                                if let Some(package) = cache::latest_plugin_package(root, &appid) {
+                                    self.plugin_packages.insert(appid, package);
+                                }
+                            }
                             let message = match self.auto_located_candidates.take() {
                                 Some(count) if count > 1 => format!(
                                     "已从 {count} 个缓存目录中选择最近使用目录，扫描到 {} 个小程序",
@@ -471,14 +508,11 @@ impl InspectorApp {
                             let failures = summary.failures.len();
                             let mut notice = Notice {
                                 message: if failures == 0 {
-                                    format!(
-                                        "已解压 {} 个主包，共 {} 个文件",
-                                        summary.package_count, summary.file_count
-                                    )
+                                    extraction_success_message(&summary)
                                 } else {
                                     format!(
-                                        "已解压 {} 个主包，{} 个失败",
-                                        summary.package_count, failures
+                                        "已解压 {} 个包，{} 个失败",
+                                        summary.package_count, failures,
                                     )
                                 },
                                 error: failures > 0,
@@ -534,11 +568,12 @@ impl InspectorApp {
             self.notify("无效 AppID", true, true);
             return;
         }
-        let path = self
-            .rows
-            .iter()
-            .find(|row| row.appid == appid)
-            .map(|row| PathBuf::from(&row.package_dir));
+        let path = cache::package_directory(Path::new(self.root.trim()), appid).or_else(|| {
+            self.rows
+                .iter()
+                .find(|row| row.appid == appid)
+                .map(|row| PathBuf::from(&row.package_dir))
+        });
         let Some(path) = path else {
             self.notify("未找到该小程序的缓存目录", true, true);
             return;
@@ -1008,7 +1043,7 @@ impl InspectorApp {
                         Layout::left_to_right(Align::Center),
                         |ui| {
                             ui.label(
-                                RichText::new(format!("依赖 {}", dependencies.len()))
+                                RichText::new(format!("插件 {}", dependencies.len()))
                                     .size(14.0)
                                     .color(TEXT_SECONDARY)
                                     .strong(),
@@ -1016,17 +1051,36 @@ impl InspectorApp {
                         },
                     );
                     for dependency in dependencies {
-                        if ui
-                            .add(icon_text_button(
-                                Icon::FolderOpen,
-                                dependency.clone(),
-                                false,
-                            ))
-                            .on_hover_text("打开依赖包目录")
-                            .clicked()
-                        {
-                            self.open_package(&dependency);
-                        }
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(260.0, UiMetrics::CONTROL_HEIGHT),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0;
+                                if ui
+                                    .add(icon_text_button(
+                                        Icon::FolderOpen,
+                                        dependency.clone(),
+                                        false,
+                                    ))
+                                    .on_hover_text("打开插件包目录")
+                                    .clicked()
+                                {
+                                    self.open_package(&dependency);
+                                }
+                                let available = self.plugin_packages.contains_key(&dependency);
+                                if ui
+                                    .add_enabled(available, standard_icon_button(Icon::PackageOpen))
+                                    .on_hover_text(if available {
+                                        "解压插件包"
+                                    } else {
+                                        "未发现插件缓存包"
+                                    })
+                                    .clicked()
+                                {
+                                    self.start_plugin_extract(&dependency);
+                                }
+                            },
+                        );
                     }
                 });
             });
@@ -1045,9 +1099,10 @@ impl InspectorApp {
                         .fill(Color32::WHITE)
                         .show(ui, |ui| {
                             ui.allocate_ui_with_layout(
-                                Vec2::new(82.0, UiMetrics::CONTROL_HEIGHT),
+                                Vec2::new(118.0, UiMetrics::CONTROL_HEIGHT),
                                 Layout::left_to_right(Align::Center),
                                 |ui| {
+                                    ui.spacing_mut().item_spacing.x = 3.0;
                                     if ui
                                         .add(plain_icon_button(Icon::X))
                                         .on_hover_text("清除选择")
@@ -1062,12 +1117,46 @@ impl InspectorApp {
                                         self.operation.is_none(),
                                     )
                                     .on_hover_text(format!(
-                                        "解压已选 {} 个主包",
+                                        "完整解压已选 {} 个小程序",
                                         self.selected.len()
                                     ))
                                     .clicked()
                                     {
-                                        self.start_extract();
+                                        self.start_extract(ExtractionMode::Complete);
+                                    }
+                                    let mut requested_mode = None;
+                                    ui.scope(|ui| {
+                                        ui.spacing_mut().interact_size =
+                                            Vec2::new(28.0, UiMetrics::CONTROL_HEIGHT);
+                                        let visuals = &mut ui.style_mut().visuals.widgets;
+                                        visuals.inactive.bg_fill = ACCENT;
+                                        visuals.inactive.fg_stroke.color = Color32::WHITE;
+                                        visuals.hovered.bg_fill = ACCENT_DARK;
+                                        visuals.hovered.fg_stroke.color = Color32::WHITE;
+                                        visuals.active.bg_fill = ACCENT_DARK;
+                                        visuals.active.fg_stroke.color = Color32::WHITE;
+                                        let icon = RichText::new(char::from(Icon::ChevronDown))
+                                            .font(egui::FontId::new(
+                                                17.0,
+                                                FontFamily::Name(ICON_FONT.into()),
+                                            ))
+                                            .color(Color32::WHITE);
+                                        ui.menu_button(icon, |ui| {
+                                            if ui.button("完整小程序（主包 + 分包）").clicked()
+                                            {
+                                                requested_mode = Some(ExtractionMode::Complete);
+                                                ui.close();
+                                            }
+                                            if ui.button("仅主包").clicked() {
+                                                requested_mode = Some(ExtractionMode::MainOnly);
+                                                ui.close();
+                                            }
+                                        })
+                                        .response
+                                        .on_hover_text("选择解压方式");
+                                    });
+                                    if let Some(mode) = requested_mode {
+                                        self.start_extract(mode);
                                     }
                                 },
                             );
@@ -1480,6 +1569,20 @@ fn dependency_ids(row: &Applet) -> Vec<String> {
         .collect()
 }
 
+fn extraction_success_message(summary: &ExtractionSummary) -> String {
+    if summary.plugin_count > 0 && summary.applet_count == 0 {
+        format!(
+            "已解压 {} 个插件，共 {} 个包、{} 个文件",
+            summary.plugin_count, summary.package_count, summary.file_count
+        )
+    } else {
+        format!(
+            "已解压 {} 个小程序，共 {} 个包、{} 个文件",
+            summary.applet_count, summary.package_count, summary.file_count
+        )
+    }
+}
+
 fn matches_query(row: &Applet, normalized_query: &str) -> bool {
     normalized_query.is_empty()
         || row.name.to_lowercase().contains(normalized_query)
@@ -1724,6 +1827,7 @@ mod tests {
             icon_path: String::new(),
             package_dir: String::new(),
             main_package: String::new(),
+            active_packages: Vec::new(),
             used_by: String::new(),
             depends_on: String::new(),
             created_at: 0,
@@ -1927,7 +2031,7 @@ mod tests {
         let disclosure_center = harness.get_by_label("收起依赖").rect().center().y;
         assert!((name_center - disclosure_center).abs() <= 1.0);
 
-        let label_center = harness.get_by_label("依赖 4").rect().center().y;
+        let label_center = harness.get_by_label("插件 4").rect().center().y;
         let first = harness.get_by_label_contains("wx1111111111111111").rect();
         assert!((label_center - first.center().y).abs() <= 1.0);
         for button in harness.get_all_by_label_contains("wx") {
@@ -2019,6 +2123,11 @@ mod tests {
             .rect();
         assert!((extract.height() - UiMetrics::CONTROL_HEIGHT).abs() <= 1.0);
         assert!((extract.width() - 46.0).abs() <= 1.0);
+        let mode_menu = harness
+            .get_by_label(&char::from(Icon::ChevronDown).to_string())
+            .rect();
+        assert!((mode_menu.height() - UiMetrics::CONTROL_HEIGHT).abs() <= 1.0);
+        assert!(mode_menu.right() <= UiMetrics::MIN_WINDOW_WIDTH);
     }
 
     #[test]

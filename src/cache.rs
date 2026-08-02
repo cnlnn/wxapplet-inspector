@@ -39,6 +39,7 @@ pub struct Applet {
     pub icon_path: String,
     pub package_dir: String,
     pub main_package: String,
+    pub active_packages: Vec<CachedPackage>,
     pub used_by: String,
     pub depends_on: String,
     pub created_at: u64,
@@ -46,6 +47,30 @@ pub struct Applet {
     pub accessed_at: u64,
     pub name_confidence: u8,
     pub name_candidates: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackageRole {
+    Main,
+    Subpackage,
+    Plugin,
+}
+
+impl PackageRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Subpackage => "subpackage",
+            Self::Plugin => "plugin",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CachedPackage {
+    pub path: String,
+    pub file_name: String,
+    pub role: PackageRole,
 }
 
 pub fn is_appid(value: &str) -> bool {
@@ -168,6 +193,81 @@ fn main_package(paths: &[PathBuf]) -> Option<PathBuf> {
                 .unwrap_or(0)
         })
         .cloned()
+}
+
+fn active_app_packages(main: &Path) -> Vec<CachedPackage> {
+    let Some(version_dir) = main.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(version_dir) else {
+        return Vec::new();
+    };
+    let mut packages = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).ok()?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return None;
+            }
+            let file_name = path.file_name()?.to_str()?.to_owned();
+            if path.extension().and_then(|value| value.to_str()) != Some("wxapkg")
+                || file_name == "__PLUGINCODE__.wxapkg"
+            {
+                return None;
+            }
+            let role = if file_name == "__APP__.wxapkg" {
+                PackageRole::Main
+            } else {
+                PackageRole::Subpackage
+            };
+            Some(CachedPackage {
+                path: path.to_string_lossy().into_owned(),
+                file_name,
+                role,
+            })
+        })
+        .collect::<Vec<_>>();
+    packages.sort_by(|left, right| {
+        let left_rank = usize::from(left.role != PackageRole::Main);
+        let right_rank = usize::from(right.role != PackageRole::Main);
+        left_rank
+            .cmp(&right_rank)
+            .then_with(|| left.file_name.cmp(&right.file_name))
+    });
+    packages
+}
+
+pub fn package_directory(root: &Path, appid: &str) -> Option<PathBuf> {
+    if !is_appid(appid) {
+        return None;
+    }
+    let info = inspect_cache_root(root)?;
+    let path = info.packages_root.join(appid);
+    path.is_dir().then_some(path)
+}
+
+pub fn latest_plugin_package(root: &Path, appid: &str) -> Option<CachedPackage> {
+    let directory = package_directory(root, appid)?;
+    let mut packages = Vec::new();
+    collect_packages(&directory, &mut packages);
+    let path = packages
+        .into_iter()
+        .filter(|path| {
+            path.file_name().and_then(|name| name.to_str()) == Some("__PLUGINCODE__.wxapkg")
+        })
+        .max_by_key(|path| {
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.parse::<u64>().ok())
+                .unwrap_or(0)
+        })?;
+    Some(CachedPackage {
+        file_name: "__PLUGINCODE__.wxapkg".into(),
+        path: path.to_string_lossy().into_owned(),
+        role: PackageRole::Plugin,
+    })
 }
 
 fn provider_ids(path: &Path) -> Vec<String> {
@@ -380,11 +480,12 @@ fn scan_directory(
         };
     };
     let providers = provider_ids(&main);
+    let active_packages = active_app_packages(&main);
     let recognition = recognition::recognize_main_package(&main);
     let metadata = fs::metadata(&main).ok();
-    let package_bytes = packages
+    let package_bytes = active_packages
         .iter()
-        .filter_map(|path| fs::metadata(path).ok())
+        .filter_map(|package| fs::metadata(&package.path).ok())
         .map(|metadata| metadata.len())
         .sum();
     let row = Applet {
@@ -397,18 +498,20 @@ fn scan_directory(
             .as_ref()
             .map(|value| value.source.clone())
             .unwrap_or_else(|| "主包未提供可信名称".into()),
-        version: packages
-            .iter()
-            .filter_map(|path| path.parent()?.file_name()?.to_str()?.parse::<u64>().ok())
-            .max()
-            .map(|value| value.to_string())
+        version: main
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.parse::<u64>().ok())
+            .map(|version| version.to_string())
             .unwrap_or_else(|| "-".into()),
-        package_count: packages.len(),
+        package_count: active_packages.len(),
         package_bytes,
         package_size: format_size(package_bytes as f64),
         icon_path: icons.get(&id).cloned().unwrap_or_default(),
         package_dir: directory.to_string_lossy().into_owned(),
         main_package: main.to_string_lossy().into_owned(),
+        active_packages,
         used_by: String::new(),
         depends_on: String::new(),
         created_at: seconds(metadata.as_ref().and_then(|value| value.created().ok())),
@@ -465,6 +568,56 @@ mod tests {
         assert_eq!(legacy_info.app_count, 1);
         assert_eq!(legacy_info.packages_root, legacy.canonicalize().unwrap());
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn classifies_only_current_main_and_subpackages_as_active() {
+        let root = std::env::temp_dir().join(format!(
+            "wxapplet-package-roles-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let current = root.join("packages/wx0123456789abcdef/12");
+        let old = root.join("packages/wx0123456789abcdef/11");
+        fs::create_dir_all(&current).unwrap();
+        fs::create_dir_all(&old).unwrap();
+        fs::write(current.join("__APP__.wxapkg"), b"main").unwrap();
+        fs::write(current.join("_pages_order_.wxapkg"), b"sub").unwrap();
+        fs::write(current.join("__PLUGINCODE__.wxapkg"), b"plugin").unwrap();
+        fs::write(old.join("_old_.wxapkg"), b"old").unwrap();
+
+        let packages = active_app_packages(&current.join("__APP__.wxapkg"));
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].role, PackageRole::Main);
+        assert_eq!(packages[1].role, PackageRole::Subpackage);
+        assert_eq!(packages[1].file_name, "_pages_order_.wxapkg");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolves_latest_plugin_without_treating_runtime_cache_as_a_package() {
+        let root = std::env::temp_dir().join(format!(
+            "wxapplet-plugin-roles-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let plugin_root = root.join("packages/wx0123456789abcdef");
+        fs::create_dir_all(plugin_root.join("3")).unwrap();
+        fs::create_dir_all(plugin_root.join("7")).unwrap();
+        fs::create_dir_all(root.join("WmpfCache/14910")).unwrap();
+        fs::write(plugin_root.join("3/__PLUGINCODE__.wxapkg"), b"old").unwrap();
+        fs::write(plugin_root.join("7/__PLUGINCODE__.wxapkg"), b"new").unwrap();
+
+        let plugin = latest_plugin_package(&root, "wx0123456789abcdef").unwrap();
+        assert_eq!(plugin.role, PackageRole::Plugin);
+        assert_eq!(
+            Path::new(&plugin.path)
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str()),
+            Some("7")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
