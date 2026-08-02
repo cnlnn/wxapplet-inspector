@@ -195,6 +195,30 @@ fn decode_javascript_escapes(value: &str) -> String {
     output
 }
 
+fn decode_url_component(value: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let raw = value.as_bytes();
+    let mut index = 0;
+    while index < raw.len() {
+        match raw[index] {
+            b'%' if index + 2 < raw.len() => {
+                let hex = std::str::from_utf8(&raw[index + 1..index + 3]).ok()?;
+                bytes.push(u8::from_str_radix(hex, 16).ok()?);
+                index += 3;
+            }
+            b'+' => {
+                bytes.push(b' ');
+                index += 1;
+            }
+            byte => {
+                bytes.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
 fn add_evidence(
     evidence: &mut Vec<NameEvidence>,
     value: &str,
@@ -393,6 +417,52 @@ fn add_javascript_evidence(text: &str, evidence: &mut Vec<NameEvidence>) {
                 weight,
             );
             start = next;
+        }
+    }
+    for marker in ["appName=", "app_name=", "gameName=", "game_name="] {
+        let mut start = 0;
+        while let Some(found) = text[start..].find(marker) {
+            let marker_start = start + found;
+            let mut context_start = marker_start.saturating_sub(320);
+            while !text.is_char_boundary(context_start) {
+                context_start += 1;
+            }
+            let context = &text[context_start..marker_start];
+            let customer_service_context = [
+                "webchat",
+                "customerService",
+                "customer-service",
+                "support",
+                "entranceId",
+                "客服",
+            ]
+            .iter()
+            .any(|indicator| context.contains(indicator));
+            let value_start = marker_start + marker.len();
+            let value_end = text[value_start..]
+                .find(|ch: char| {
+                    matches!(ch, '&' | '#' | '"' | '\'' | '\\' | '<' | '>') || ch.is_whitespace()
+                })
+                .map(|end| value_start + end)
+                .unwrap_or(text.len());
+            let raw = &text[value_start..value_end];
+            if let Some(value) = decode_url_component(raw) {
+                let cjk_count = value
+                    .chars()
+                    .filter(|ch| ('\u{4e00}'..='\u{9fff}').contains(ch))
+                    .count();
+                if cjk_count >= 2 && customer_service_context {
+                    add_evidence(
+                        evidence,
+                        &value,
+                        "javascript:query-name",
+                        EvidenceFamily::IdentityField,
+                        EvidenceTier::Primary,
+                        96,
+                    );
+                }
+            }
+            start = value_end.max(value_start + 1);
         }
     }
     let mut start = 0;
@@ -824,6 +894,36 @@ mod tests {
         .unwrap();
         assert_eq!(result.name, "多多买菜");
         assert!(result.source.starts_with("page-frequency:"));
+    }
+
+    #[test]
+    fn recognizes_minigame_name_from_support_url_query() {
+        let result = recognize(&[(
+            "game.js",
+            concat!(
+                "openURL({url:\"https://support.example/chat?entrance=2&",
+                "appName=%E4%B8%89%E5%9B%BD%E5%86%B0%E6%B2%B3%E6%97%B6%E4%BB%A3&userId=1\"});",
+                "const dynamic='appName='+runtimeName;"
+            )
+            .as_bytes(),
+        )])
+        .unwrap();
+        assert_eq!(result.name, "三国冰河时代");
+        assert!(result.source.starts_with("format:javascript:query-name"));
+    }
+
+    #[test]
+    fn ignores_names_of_nested_games_in_navigation_urls() {
+        let result = recognize(&[(
+            "app-service.js",
+            concat!(
+                "appName:\"美团\";",
+                "target:\"/game/index?gameName=%E7%AD%94%E9%A2%98&source=home\";"
+            )
+            .as_bytes(),
+        )])
+        .unwrap();
+        assert_eq!(result.name, "美团");
     }
 
     #[test]
