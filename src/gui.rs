@@ -597,9 +597,17 @@ impl InspectorApp {
                         } else {
                             36.0
                         };
-                        let path_width =
-                            (available - 72.0 - cancel_width - progress_width - spacing * 4.0)
-                                .max(320.0);
+                        let operation_gaps = if kind == OperationKind::Locate {
+                            4.0
+                        } else {
+                            5.0
+                        };
+                        let path_width = (available
+                            - 108.0
+                            - cancel_width
+                            - progress_width
+                            - spacing * operation_gaps)
+                            .max(320.0);
                         self.path_controls_with_width(ui, path_width);
                         let total = operation_total.max(1);
                         let progress = completed as f32 / total as f32;
@@ -1869,6 +1877,15 @@ mod tests {
         assert_eq!(harness.get_all_by_label(&locate_icon).count(), 1);
         let cancel_icon = char::from(Icon::CircleX).to_string();
         assert!(harness.query_by_label(&cancel_icon).is_none());
+
+        let state = harness.state_mut();
+        state.scanned = true;
+        state.rows = vec![row("自动定位边界测试", "1")];
+        harness.step();
+        assert!(
+            harness.get_by_label("正在定位微信缓存").rect().right() <= UiMetrics::MIN_WINDOW_WIDTH
+        );
+        assert!(harness.get_by_label("访问日期").rect().right() <= UiMetrics::MIN_WINDOW_WIDTH);
     }
 
     #[test]
