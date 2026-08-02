@@ -1,5 +1,16 @@
 use std::{path::Path, process::Command};
 
+pub fn display_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        value.into_owned()
+    }
+}
+
 pub fn open_path(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("目录不存在：{}", path.display()));
@@ -19,4 +30,22 @@ pub fn open_path(path: &Path) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("无法打开目录：{error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hides_windows_extended_path_prefix_for_display() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\C:\Users\root\Applet")),
+            r"C:\Users\root\Applet"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\Applet")),
+            r"\\server\share\Applet"
+        );
+        assert_eq!(display_path(Path::new("/tmp/Applet")), "/tmp/Applet");
+    }
 }

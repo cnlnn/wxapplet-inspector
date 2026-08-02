@@ -202,6 +202,7 @@ impl InspectorApp {
                 .and_then(|storage| storage.get_string(STORAGE_ROOT))
                 .unwrap_or_default()
         });
+        let root = platform::display_path(Path::new(&root));
         let (tx, rx) = mpsc::channel();
         let app = Self {
             root,
@@ -326,7 +327,7 @@ impl InspectorApp {
             dialog = dialog.set_directory(self.root.trim());
         }
         if let Some(path) = dialog.pick_folder() {
-            self.root = path.to_string_lossy().into_owned();
+            self.root = platform::display_path(&path);
             self.start_scan();
         }
     }
@@ -424,7 +425,7 @@ impl InspectorApp {
                     }
                     self.operation = None;
                     if let Some(candidate) = result.first() {
-                        self.root = candidate.path.to_string_lossy().into_owned();
+                        self.root = platform::display_path(&candidate.path);
                         self.auto_located_candidates = Some(result.len());
                         self.start_scan();
                     } else {

@@ -134,10 +134,26 @@ fn clean_name(value: &str) -> Option<String> {
             .iter()
             .any(|prefix| title.starts_with(prefix))
         || title.contains("不存在")
+        || looks_like_technical_identifier(&title)
     {
         return None;
     }
     Some(title)
+}
+
+fn looks_like_technical_identifier(value: &str) -> bool {
+    let has_cjk = value
+        .chars()
+        .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch));
+    if has_cjk || !value.is_ascii() {
+        return false;
+    }
+    let separators = value.chars().filter(|ch| matches!(ch, '-' | '_')).count();
+    let lower = value.to_ascii_lowercase();
+    separators >= 2
+        && ["app", "mobile", "mini", "mp", "weapp", "wechat", "xcx"]
+            .iter()
+            .any(|token| lower.split(['-', '_']).any(|part| part == *token))
 }
 
 fn decode_javascript_escapes(value: &str) -> String {
@@ -694,6 +710,38 @@ pub fn recognize_main_package(path: &std::path::Path) -> Option<Recognition> {
     if frequency_tiebreak {
         return Some(build_recognition("frequency-tiebreak", &voted[0], &voted));
     }
+    let mut repeated_pages = rank(
+        &evidence
+            .iter()
+            .filter(|item| item.family == EvidenceFamily::Page)
+            .cloned()
+            .collect::<Vec<_>>(),
+        false,
+    );
+    repeated_pages.sort_by(|left, right| {
+        right
+            .occurrences
+            .cmp(&left.occurrences)
+            .then_with(|| right.score.cmp(&left.score))
+    });
+    let repeated_page = repeated_pages.first().is_some_and(|best| {
+        best.occurrences >= 3
+            && best.value.chars().count() >= 4
+            && best
+                .value
+                .chars()
+                .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+            && repeated_pages
+                .get(1)
+                .is_none_or(|next| best.occurrences > next.occurrences)
+    });
+    if repeated_page {
+        return Some(build_recognition(
+            "page-frequency",
+            &repeated_pages[0],
+            &repeated_pages,
+        ));
+    }
     let page_only = !evidence.is_empty()
         && evidence
             .iter()
@@ -753,6 +801,29 @@ mod tests {
         )])
         .unwrap();
         assert_eq!(result.name, "小萝卜报名");
+    }
+
+    #[test]
+    fn rejects_technical_slug_and_uses_repeated_page_brand() {
+        let result = recognize(&[(
+            "app-service.js",
+            concat!(
+                "appName:\"mobile-xcx-vegetable\";",
+                "navigationBarTitleText\":\"多多买菜\";",
+                "navigationBarTitleText\":\"多多买菜\";",
+                "navigationBarTitleText\":\"多多买菜\";",
+                "navigationBarTitleText\":\"多多买菜\";",
+                "navigationBarTitleText\":\"多多买菜\";",
+                "navigationBarTitleText\":\"分享助手\";",
+                "navigationBarTitleText\":\"分享助手\";",
+                "navigationBarTitleText\":\"分享助手\";",
+                "navigationBarTitleText\":\"分享助手\";"
+            )
+            .as_bytes(),
+        )])
+        .unwrap();
+        assert_eq!(result.name, "多多买菜");
+        assert!(result.source.starts_with("page-frequency:"));
     }
 
     #[test]

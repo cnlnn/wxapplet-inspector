@@ -759,6 +759,28 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_windows_cache_recognizes_names_when_configured() {
+        let Ok(root) = std::env::var("WXAPPLET_ENCRYPTED_ROOT") else {
+            return;
+        };
+        let rows = scan(Path::new(&root)).unwrap();
+        assert!(!rows.is_empty());
+        for row in &rows {
+            let diagnostics =
+                crate::recognition::recognition_diagnostics(Path::new(&row.main_package));
+            println!(
+                "{}\t{}\t{}\t{}",
+                row.appid,
+                row.name,
+                row.name_source,
+                diagnostics.join("; ")
+            );
+        }
+        let recognized = rows.iter().filter(|row| row.name != "未识别").count();
+        assert!(recognized > 0, "加密包已被扫描，但没有任何小程序名称被识别");
+    }
+
+    #[test]
     fn runtime_recognizer_contains_no_appid_mapping() {
         let source = include_str!("recognition.rs");
         assert!(
