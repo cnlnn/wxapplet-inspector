@@ -768,22 +768,27 @@ impl InspectorApp {
             );
             ui.add_space(10.0);
             if !self.scanned && self.operation.is_none() {
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(standard_icon_button(Icon::LocateFixed))
-                        .on_hover_text("自动定位")
-                        .clicked()
-                    {
-                        self.start_locate();
-                    }
-                    if ui
-                        .add(standard_icon_button(Icon::FolderOpen))
-                        .on_hover_text("选择目录")
-                        .clicked()
-                    {
-                        self.choose_and_scan();
-                    }
-                });
+                let action_width = UiMetrics::CONTROL_HEIGHT * 2.0 + ui.spacing().item_spacing.x;
+                ui.allocate_ui_with_layout(
+                    Vec2::new(action_width, UiMetrics::CONTROL_HEIGHT),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        if ui
+                            .add(standard_icon_button(Icon::LocateFixed))
+                            .on_hover_text("自动定位")
+                            .clicked()
+                        {
+                            self.start_locate();
+                        }
+                        if ui
+                            .add(standard_icon_button(Icon::FolderOpen))
+                            .on_hover_text("选择目录")
+                            .clicked()
+                        {
+                            self.choose_and_scan();
+                        }
+                    },
+                );
             } else if !self.query.is_empty()
                 && !self.rows.is_empty()
                 && ui
@@ -1902,6 +1907,19 @@ mod tests {
         for button in harness.get_all_by_label(&folder_icon) {
             assert!((button.rect().height() - UiMetrics::CONTROL_HEIGHT).abs() <= 1.0);
         }
+        let message_center = harness.get_by_label("尚未扫描缓存目录").rect().center().x;
+        let empty_locate = harness
+            .get_all_by_label(&locate_icon)
+            .last()
+            .expect("empty-state locate button")
+            .rect();
+        let empty_folder = harness
+            .get_all_by_label(&folder_icon)
+            .last()
+            .expect("empty-state folder button")
+            .rect();
+        let actions_center = (empty_locate.left() + empty_folder.right()) / 2.0;
+        assert!((message_center - actions_center).abs() <= 1.0);
 
         let state = harness.state_mut();
         state.scanned = true;
